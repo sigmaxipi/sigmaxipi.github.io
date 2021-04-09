@@ -71,7 +71,7 @@ async function listVideos() {
   let dirListing = undefined;
   try {
     log(`Loading videos from "${CONTENT_DIR}"`);
-    dirListing = await $.ajax(CONTENT_DIR);
+    dirListing = await $.ajax(CONTENT_DIR + "/index.html");
   } catch (e) {
     logE(`Unable to load media from "${CONTENT_DIR}" directory: "${e.statusText}"!`);
     return;
