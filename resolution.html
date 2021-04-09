@@ -1,0 +1,224 @@
+<html>
+  <head>
+    <title>WebXR Video Player demonstrating quality</title>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <style>
+body { background-color: black; font-family: sans-serif; max-width: 800px; margin: auto;
+       color: white;}
+#log { border: 1px solid white; font-family: monospace; font-size: 20px; padding: 1em; }
+#log .time { color: lightgray; }
+#log .info { color: white; }
+#log .error { color: red; }
+    </style>
+  </head>
+<body>
+  <video id="video" width="25%" controls="true"></video><br />
+  <select id="select"></select>
+  <button id="enterVr" disabled>Initializing XR system...</button><br />
+  <div id="log"></div>
+  <script>
+///////// Config & globals
+const CONTENT_DIR = "content";
+let gl = undefined;
+let xrSession = undefined;
+let xrRefSpace = undefined;
+let xrMediaFactory = undefined;
+let eqrLayer = undefined;
+
+///////// Utility
+function log(str, clazz) {
+  clazz = clazz || 'info';
+  const now = new Date();
+  const time =
+      `${now.toTimeString().substr(0, 8)}.${(now.getMilliseconds() / 1000).toFixed(3).substr(2)}`;
+  $('#log').append(`<div class=${clazz}><span class="time">${time}&gt;</span> ${str}</div>`);
+
+  if (clazz === 'error') {
+    console.error(`${time}> ${str}`);
+  } else {
+    console.log(`${time}> ${str}`);
+  }
+}
+function logE(str) {
+  log(str, 'error');
+}
+
+///////// Initialization
+function initXR() {
+  if (navigator.xr) {
+    navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+      if (supported) {
+        log("WebXR support detected :)");
+        listVideos();
+        const button = $('#enterVr')[0];
+        button.addEventListener('click', enterVr);
+        button.textContent = 'Enter VR';
+        button.disabled = false;
+      } else {
+        logE("navigator.xr.isSessionSupported('immersive-vr') returned false.");
+      }
+    });
+  } else {
+    logE("navigator.xr is undefined. Does this browser support WebXR?");
+    if (window.location.protocol !== "https" && window.location.hostname !== "localhost") {
+      logE("WebXR needs HTTPS or localhost to work.");
+    }
+  }
+}
+
+///////// Video loading
+async function listVideos() {
+  let dirListing = undefined;
+  try {
+    log(`Loading videos from "${CONTENT_DIR}"`);
+    dirListing = await $.ajax(CONTENT_DIR);
+  } catch (e) {
+    logE(`Unable to load media from "${CONTENT_DIR}" directory: "${e.statusText}"!`);
+    return;
+  }
+
+  const lines = dirListing.split("</a>");
+  if (lines.length < 2) {
+    logE(`No files in "${CONTENT_DIR}"!`);
+    return;
+  }
+
+  const files = lines
+    .filter(l => l.endsWith('.mp4') || l.endsWith('.webm'))
+    .map(l => l.substr(l.lastIndexOf('href') + 7));
+
+  $("#select").empty();
+  files.forEach(entry => {
+    [url, name] = entry.split('">');
+    $("#select").append(new Option(name, url));
+  });
+
+  log(`Found ${files.length} files in "${CONTENT_DIR}" directory.`);
+  loadVideo();
+}
+
+function loadVideo() {
+  const filename = $('#select option:selected').val();
+  $('#video').attr('src', filename);
+  log(`Loading "${filename}"...`);
+}
+$('#video').on('loadeddata', () => {
+  const v = $('#video')[0];
+  log(`Loaded video of size [${v.videoWidth}x${v.videoHeight}].`);
+});
+$('#select').on('change', loadVideo);
+
+function prev() {
+  const v = $('#video')[0];
+  $('#select option:selected')
+    .prop("selected", false)
+    .prev()
+    .prop("selected", true);
+  loadVideo();
+  v.play();
+}
+function next() {
+  const v = $('#video')[0];
+  $('#select option:selected')
+    .prop("selected", false)
+    .next()
+    .prop("selected", true);
+  loadVideo();
+  v.play();
+}
+setInterval(function () {
+  const v = $('#video')[0];
+  if (v.currentTime > v.duration * .99) {
+    next();
+  }
+}, 100);
+
+///////// VR Session Management
+function enterVr() {
+  if (!xrSession) {
+    log("Entering VR...");
+    navigator.xr
+      .requestSession('immersive-vr', { requiredFeatures: ['layers'] })
+      .then(onSessionStarted);
+  } else {
+    logE("xrSession already defined. Ending session!");
+    xrSession.end();
+  }
+}
+
+function onSessionStarted(session) {
+  log(".onSessionStarted()");
+
+  xrSession = session;
+  session.addEventListener('end', onSessionEnded);
+
+  let canvas = document.createElement('canvas');
+  gl = canvas.getContext('webgl2', { xrCompatible: true, webgl2: true });
+
+  xrMediaFactory = new XRMediaBinding(session);
+
+  session.requestReferenceSpace('local').then((refSpace) => {
+    xrRefSpace = refSpace;
+
+    let layer = xrMediaFactory
+      .createEquirectLayer(video, {
+        space: refSpace,
+        centralHorizontalAngle: Math.PI,
+        upperVerticalAngle: Math.PI / 2.0,
+        lowerVerticalAngle: -Math.PI / 2.0,
+        layout: "stereo-left-right"
+      });
+
+    session.updateRenderState({ layers: [layer] });
+    session.requestAnimationFrame(onXRFrame);
+    $('#video')[0].play();
+    $('#video')[0].requestVideoFrameCallback(videoFrameCallback);
+  });
+}
+
+let vTs = 0;
+function videoFrameCallback(now) {
+  //    console.log(`requestVideoFrameCallback ${now - vTs}`);
+  vTs = now;
+  $('#video')[0].requestVideoFrameCallback(videoFrameCallback);
+}
+
+function onSessionEnded(session) {
+  log(".onSessionEnded()");
+  xrSession = null;
+  $('#video')[0].pause();
+  gl = null;
+}
+
+///////// Rendering
+let xrTs = 0;
+let lastClickTime = 0;
+function onXRFrame(time, frame) {
+  //    console.log(`onXRFrame ${time - xrTs}`);
+  xrTs = time;
+  xrSession.requestAnimationFrame(onXRFrame);
+
+  for (const source of xrSession.inputSources) {
+    if (source.gamepad) {
+      const buttons = source.gamepad.buttons;
+      if (buttons[0].pressed) {
+        $('#video')[0].pause();
+      } else if (buttons[1].pressed) {
+        $('#video')[0].play();
+      } else if (buttons[4].pressed && (time - lastClickTime) > 1000) {
+        next();
+        lastClickTime = time;
+      } else if (buttons[5].pressed && (time - lastClickTime) > 1000) {
+        prev();
+        lastClickTime = time;
+      }
+      //            console.log(time + buttons.map(b => b.pressed?'1':'0').join(''));
+    }
+  }
+}
+
+log("Initializing...");
+initXR();
+    </script>
+  </body>
+</html>
